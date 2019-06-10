@@ -1,352 +1,214 @@
+/*
+ Version 0.3 - March 06 2018
+*/ 
+#include <Stepper.h>
+#include <Arduino.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
-#include <WiFiUdp.h>
-#include <functional>
-#include <ArduinoJson.h> 
+#include <ESP8266WiFiMulti.h>
+#include <WebSocketsClient.h> //  get it from https://github.com/Links2004/arduinoWebSockets/releases 
+#include <ArduinoJson.h> // get it from https://arduinojson.org/ or install via Arduino library manager
+#include <StreamString.h>
 
+ESP8266WiFiMulti WiFiMulti;
+WebSocketsClient webSocket;
+WiFiClient client;
 
+#define MyApiKey "4328a85e-2d89-459a-a4c9-1985c6fa31d0" // TODO: Change to your sinric API Key. Your API Key is displayed on sinric.com dashboard
+#define MySSID "2ndFLOOR" // TODO: Change to your Wifi network SSID
+#define MyWifiPassword "books4ume" // TODO: Change to your Wifi network password
+//#define MYPIN1 14
+//#define DISTANCE 3200
 
-int smDirectionPin = D7; //Direction pin
-int smStepPin = D5; //Stepper pin
+//int oneway;         // counter for steps
+//int onerev = 1091;               // number of steps each direction (edit this for your particular motor)
+//int Stepping = false;
+//int StepCounter = 0;
 
+//int microSecDelay = 50;          // delay between steps and speed of the motor 
+////                                    (about as fast as the system can react,
+//  //                                  higher number = slower)
+const int dirPin = D7;                  // output pin for stepper motor direction
+const int stepPin = D5;                 // output pin for the pin used to step the motor
 
-void prepareIds();
-boolean connectWifi();
-boolean connectUDP();
-void startHttpServer();
+#define HEARTBEAT_INTERVAL 300000 // 5 Minutes 
 
+uint64_t heartbeatTimestamp = 0;
+bool isConnected = false;
+//boolean alreadyRun = false;
 
-const char* ssid = "********"; // add your network's name
-const char* password = "***********"; //and the password
+void setPowerStateOnServer(String deviceId, String value);
+//void setTargetTemperatureOnServer(String deviceId, String value, String scale);
 
-unsigned int localPort = 1900;      // local port to listen on
-
-WiFiUDP UDP;
-boolean udpConnected = false;
-IPAddress ipMulti(239, 255, 255, 250);
-unsigned int portMulti = 1900;      // local port to listen on
-
-ESP8266WebServer HTTP(80);
- 
-boolean wifiConnected = false;
-
-char packetBuffer[UDP_TX_PACKET_MAX_SIZE]; //buffer to hold incoming packet,
-
-String serial;
-String persistent_uuid;
-String device_name;
-
-
-
-boolean cannotConnectToWifi = false;
-
-void setup() {
-
-  Serial.begin(115200);
-  pinMode(smDirectionPin, OUTPUT);
-  pinMode(smStepPin, OUTPUT);
-  // Setup Relay
- // pinMode(relayPin, OUTPUT);
-  
-
-  delay(50);
-  Serial.println("Enabling IRin");
-  prepareIds();
-  
-  // Initialise wifi connection
-  wifiConnected = connectWifi();
-
-  // only proceed if wifi connection successful
-  if(wifiConnected){
-    udpConnected = connectUDP();
-    
-    if (udpConnected){
-      // initialise pins if needed 
-      startHttpServer();
-    }
-  }  
+// deviceId is the ID assgined to your smart-home-device in sinric.com dashboard. Copy it from dashboard and paste it here
+void turnOn(String deviceId) {
+  if (deviceId == "5cfe5792fccdb547c64c9019") // Device ID of first device
+  {  
+    Serial.print("Turn on device id: ");
+    Serial.println(deviceId);
+    digitalWrite(dirPin,HIGH); // Enables the motor to move in a particular direction
+    // Makes 10000 pulses for making one full cycle rotation
+    for(int x = 0; x < 10000; x++) {
+    digitalWrite(stepPin,HIGH); 
+    delayMicroseconds(500); 
+    digitalWrite(stepPin,LOW); 
+    delayMicroseconds(500); 
+    yield();
+  }
+  }
+ else {
+   Serial.print("Turn on for unknown device id: ");
+    Serial.println(deviceId);    
+  }     
 }
 
-void loop() {
+void turnOff(String deviceId) {
+   if (deviceId == "5cfe5792fccdb547c64c9019") // Device ID of first device
+   {  
+    Serial.print("Turn off device id: ");
+    Serial.println(deviceId);
+    digitalWrite(dirPin,LOW); //Changes the rotations direction
+    // Makes 10000 pulses for making one full cycle rotation
+    for(int x = 0; x < 10000; x++) {
+    digitalWrite(stepPin,HIGH);
+    delayMicroseconds(500);
+    digitalWrite(stepPin,LOW);
+    delayMicroseconds(500);
+    yield();
+    }
+   }  
+  else {
+     Serial.print("Turn off for unknown device id: ");
+     Serial.println(deviceId);    
+  }
+}
 
-  HTTP.handleClient();
-  delay(1);
-  
-  
-  // if there's data available, read a packet
-  // check if the WiFi and UDP connections were successful
-  if(wifiConnected){
-    if(udpConnected){    
-      // if there’s data available, read a packet
-      int packetSize = UDP.parsePacket();
-      
-      if(packetSize) {
-        Serial.println("");
-        Serial.print("Received packet of size ");
-        Serial.println(packetSize);
-        Serial.print("From ");
-        IPAddress remote = UDP.remoteIP();
-        
-        for (int i =0; i < 4; i++) {
-          Serial.print(remote[i], DEC);
-          if (i < 3) {
-            Serial.print(".");
-          }
-        }
-        
-        Serial.print(", port ");
-        Serial.println(UDP.remotePort());
-        
-        int len = UDP.read(packetBuffer, 255);
-        
-        if (len > 0) {
-            packetBuffer[len] = 0;
-        }
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      isConnected = false;    
+      Serial.printf("[WSc] Webservice disconnected from sinric.com!\n");
+      break;
+    case WStype_CONNECTED: {
+      isConnected = true;
+      Serial.printf("[WSc] Service connected to sinric.com at url: %s\n", payload);
+      Serial.printf("Waiting for commands from sinric.com ...\n");        
+      }
+      break;
+    case WStype_TEXT: {
+        Serial.printf("[WSc] get text: %s\n", payload);
+        // Example payloads
 
-        String request = packetBuffer;
-        //Serial.println("Request:");
-        //Serial.println(request);
-         
-        if(request.indexOf('M-SEARCH') > 0) {
-            if(request.indexOf("urn:Belkin:device:**") > 0) {
-                Serial.println("Responding to search request ...");
-                respondToSearch();
+        // For Switch or Light device types
+        // {"deviceId": xxxx, "action": "setPowerState", value: "ON"} // https://developer.amazon.com/docs/device-apis/alexa-powercontroller.html
+
+        // For Light device type
+        // Look at the light example in github
+          
+        DynamicJsonBuffer jsonBuffer;
+        JsonObject& json = jsonBuffer.parseObject((char*)payload); 
+        String deviceId = json ["deviceId"];     
+        String action = json ["action"];
+        
+        if(action == "setPowerState") { // Switch or Light
+            String value = json ["value"];
+            if(value == "ON") {
+                turnOn(deviceId);
+            } else {
+                turnOff(deviceId);
             }
         }
+        else if (action == "SetTargetTemperature") {
+            String deviceId = json ["deviceId"];     
+            String action = json ["action"];
+            String value = json ["value"];
+        }
+        else if (action == "test") {
+            Serial.println("[WSc] received test command from sinric.com");
+        }
       }
-        
-      delay(10);
-    }
-  } else {
-      // Turn on/off to indicate cannot connect ..      
+      break;
+    case WStype_BIN:
+      Serial.printf("[WSc] get binary length: %u\n", length);
+      break;
   }
 }
 
-void prepareIds() {
-  uint32_t chipId = ESP.getChipId();
-  char uuid[64];
-  sprintf_P(uuid, PSTR("38323636-4558-4dda-9188-cda0e6%02x%02x%02x"),
-        (uint16_t) ((chipId >> 16) & 0xff),
-        (uint16_t) ((chipId >>  8) & 0xff),
-        (uint16_t)   chipId        & 0xff);
+void setup() {
+  Serial.begin(115200);
+  pinMode(stepPin,OUTPUT); 
+  pinMode(dirPin,OUTPUT);
 
-  serial = String(uuid);
-  persistent_uuid = "Socket-1_0-" + serial;
-  device_name = "blinds";
-}
+  WiFiMulti.addAP(MySSID, MyWifiPassword);
+  Serial.println();
+  Serial.print("Connecting to Wifi: ");
+  Serial.println(MySSID);  
 
-void respondToSearch() {
-    Serial.println("");
-    Serial.print("Sending response to ");
-    Serial.println(UDP.remoteIP());
-    Serial.print("Port : ");
-    Serial.println(UDP.remotePort());
-
-    IPAddress localIP = WiFi.localIP();
-    char s[16];
-    sprintf(s, "%d.%d.%d.%d", localIP[0], localIP[1], localIP[2], localIP[3]);
-
-    String response = 
-         "HTTP/1.1 200 OK\r\n"
-         "CACHE-CONTROL: max-age=86400\r\n"
-         "DATE: Fri, 15 Apr 2016 04:56:29 GMT\r\n"
-         "EXT:\r\n"
-         "LOCATION: http://" + String(s) + ":80/setup.xml\r\n"
-         "OPT: \"http://schemas.upnp.org/upnp/1/0/\"; ns=01\r\n"
-         "01-NLS: b9200ebb-736d-4b93-bf03-835149d13983\r\n"
-         "SERVER: Unspecified, UPnP/1.0, Unspecified\r\n"
-         "ST: urn:Belkin:device:**\r\n"
-         "USN: uuid:" + persistent_uuid + "::urn:Belkin:device:**\r\n"
-         "X-User-Agent: redsonic\r\n\r\n";
-
-    UDP.beginPacket(UDP.remoteIP(), UDP.remotePort());
-    UDP.write(response.c_str());
-    UDP.endPacket();                    
-
-     Serial.println("Response sent !");
-}
-
-void startHttpServer() {
-    HTTP.on("/index.html", HTTP_GET, [](){
-      Serial.println("Got Request index.html ...\n");
-      HTTP.send(200, "text/plain", "Hello World!");
-    });
-
-    HTTP.on("/upnp/control/basicevent1", HTTP_POST, []() {
-      Serial.println("########## Responding to  /upnp/control/basicevent1 ... ##########");      
-
-      //for (int x=0; x <= HTTP.args(); x++) {
-      //  Serial.println(HTTP.arg(x));
-      //}
-  
-      String request = HTTP.arg(0);      
-      Serial.print("request:");
-      Serial.println(request);
- 
-      if(request.indexOf("<BinaryState>1</BinaryState>") > 0) {
-          Serial.println("Got Turn on request");
-          turnOnBlinds();
-         
-      }
-
-      if(request.indexOf("<BinaryState>0</BinaryState>") > 0) {
-          Serial.println("Got Turn off request");
-          turnOffBlinds();
-      }
-      
-      HTTP.send(200, "text/plain", "");
-    });
-
-    HTTP.on("/eventservice.xml", HTTP_GET, [](){
-      Serial.println(" ########## Responding to eventservice.xml ... ########\n");
-      String eventservice_xml = "<?scpd xmlns=\"urn:Belkin:service-1-0\"?>"
-            "<actionList>"
-              "<action>"
-                "<name>SetBinaryState</name>"
-                "<argumentList>"
-                  "<argument>"
-                    "<retval/>"
-                    "<name>BinaryState</name>"
-                    "<relatedStateVariable>BinaryState</relatedStateVariable>"
-                    "<direction>in</direction>"
-                  "</argument>"
-                "</argumentList>"
-                 "<serviceStateTable>"
-                  "<stateVariable sendEvents=\"yes\">"
-                    "<name>BinaryState</name>"
-                    "<dataType>Boolean</dataType>"
-                    "<defaultValue>0</defaultValue>"
-                  "</stateVariable>"
-                  "<stateVariable sendEvents=\"yes\">"
-                    "<name>level</name>"
-                    "<dataType>string</dataType>"
-                    "<defaultValue>0</defaultValue>"
-                  "</stateVariable>"
-                "</serviceStateTable>"
-              "</action>"
-            "</scpd>\r\n"
-            "\r\n";
-            
-      HTTP.send(200, "text/plain", eventservice_xml.c_str());
-    });
-    
-    HTTP.on("/setup.xml", HTTP_GET, [](){
-      Serial.println(" ########## Responding to setup.xml ... ########\n");
-
-      IPAddress localIP = WiFi.localIP();
-      char s[16];
-      sprintf(s, "%d.%d.%d.%d", localIP[0], localIP[1], localIP[2], localIP[3]);
-    
-      String setup_xml = "<?xml version=\"1.0\"?>"
-            "<root>"
-             "<device>"
-                "<deviceType>urn:Belkin:device:controllee:1</deviceType>"
-                "<friendlyName>"+ device_name +"</friendlyName>"
-                "<manufacturer>Belkin International Inc.</manufacturer>"
-                "<modelName>Emulated Socket</modelName>"
-                "<modelNumber>3.1415</modelNumber>"
-                "<UDN>uuid:"+ persistent_uuid +"</UDN>"
-                "<serialNumber>221517K0101769</serialNumber>"
-                "<binaryState>0</binaryState>"
-                "<serviceList>"
-                  "<service>"
-                      "<serviceType>urn:Belkin:service:basicevent:1</serviceType>"
-                      "<serviceId>urn:Belkin:serviceId:basicevent1</serviceId>"
-                      "<controlURL>/upnp/control/basicevent1</controlURL>"
-                      "<eventSubURL>/upnp/event/basicevent1</eventSubURL>"
-                      "<SCPDURL>/eventservice.xml</SCPDURL>"
-                  "</service>"
-              "</serviceList>" 
-              "</device>"
-            "</root>\r\n"
-            "\r\n";
-            
-        HTTP.send(200, "text/xml", setup_xml.c_str());
-        
-        Serial.print("Sending :");
-        Serial.println(setup_xml);
-    });
-    
-    HTTP.begin();  
-    Serial.println("HTTP Server started ..");
-}
-
-
-      
-// connect to wifi – returns true if successful or false if not
-boolean connectWifi(){
-  boolean state = true;
-  int i = 0;
-  
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  Serial.println("");
-  Serial.println("Connecting to WiFi");
-
-  // Wait for connection
-  Serial.print("Connecting ...");
-  while (WiFi.status() != WL_CONNECTED) {
+  // Waiting for Wifi connect
+  while(WiFiMulti.run() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
-    if (i > 10){
-      state = false;
-      break;
-    }
-    i++;
   }
-  
-  if (state){
+  if(WiFiMulti.run() == WL_CONNECTED) {
     Serial.println("");
-    Serial.print("Connected to ");
-    Serial.println(ssid);
+    Serial.print("WiFi connected. ");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
   }
-  else {
-    Serial.println("");
-    Serial.println("Connection failed.");
-  }
+
+  // server address, port and URL
+  webSocket.begin("iot.sinric.com", 80, "/");
+
+  // event handler
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setAuthorization("apikey", MyApiKey);
   
-  return state;
+  // try again every 5000ms if connection has failed
+  webSocket.setReconnectInterval(5000);   // If you see 'class WebSocketsClient' has no member named 'setReconnectInterval' error update arduinoWebSockets
 }
 
-boolean connectUDP(){
-  boolean state = false;
+void loop() {
+  webSocket.loop();
   
-  Serial.println("");
-  Serial.println("Connecting to UDP");
-  
-  if(UDP.beginMulticast(WiFi.localIP(), ipMulti, portMulti)) {
-    Serial.println("Connection successful");
-    state = true;
-  }
-  else{
-    Serial.println("Connection failed");
-  }
-  
-  return state;
+  if(isConnected) {
+      uint64_t now = millis();
+      
+      // Send heartbeat in order to avoid disconnections during ISP resetting IPs over night. Thanks @MacSass
+      if((now - heartbeatTimestamp) > HEARTBEAT_INTERVAL) {
+          heartbeatTimestamp = now;
+          webSocket.sendTXT("H");          
+      }
+  }   
 }
 
-void turnOnBlinds() {
-// digitalWrite(relayPin, HIGH); // turn on relay with voltage HIGH 
-    digitalWrite(smDirectionPin, HIGH); //Writes the direction to the EasyDriver DIR pin. (HIGH is clockwise).
-  /*Slowly turns the motor 1600 steps*/
-  for (int i = 0; i < 1600; i++){
-    digitalWrite(smStepPin, HIGH);
-    delayMicroseconds(500);
-    digitalWrite(smStepPin, LOW);
-    delayMicroseconds(500);
-}
+// If you are going to use a push button to on/off the switch manually, use this function to update the status on the server
+// so it will reflect on Alexa app.
+// eg: setPowerStateOnServer("deviceid", "ON")
+void setPowerStateOnServer(String deviceId, String value) {
+  DynamicJsonBuffer jsonBuffer;
+  JsonObject& root = jsonBuffer.createObject();
+  root["deviceId"] = deviceId;
+  root["action"] = "setPowerState";
+  root["value"] = value;
+  StreamString databuf;
+  root.printTo(databuf);
+  
+  webSocket.sendTXT(databuf);
 }
 
-void turnOffBlinds() {
-  //digitalWrite(relayPin, LOW);  // turn off relay with voltage LOW
-    digitalWrite(smDirectionPin, LOW); //Writes the direction to the EasyDriver DIR pin. (LOW is counter clockwise).
-  /*Turns the motor fast 1600 steps*/
-  for (int i = 0; i < 1600; i++){
-    digitalWrite(smStepPin, HIGH);
-    delayMicroseconds(500);
-    digitalWrite(smStepPin, LOW);
-    delayMicroseconds(500);
-}
+//eg: setPowerStateOnServer("deviceid", "CELSIUS", "25.0")
+void setTargetTemperatureOnServer(String deviceId, String value, String scale) {
+  DynamicJsonBuffer jsonBuffer;
+  JsonObject& root = jsonBuffer.createObject();
+  root["action"] = "SetTargetTemperature";
+  root["deviceId"] = deviceId;
+  
+  JsonObject& valueObj = root.createNestedObject("value");
+  JsonObject& targetSetpoint = valueObj.createNestedObject("targetSetpoint");
+  targetSetpoint["value"] = value;
+  targetSetpoint["scale"] = scale;
+   
+  StreamString databuf;
+  root.printTo(databuf);
+  
+  webSocket.sendTXT(databuf);
 }
